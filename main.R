@@ -1,5 +1,5 @@
 library(gutenbergr)
-library(poorman)
+library(dplyr)
 library(stringr)
 library(tidytext)
 library(purrr)
@@ -9,7 +9,17 @@ library(keras)
 library(markovifyR)
 library(knitr)
 library(reticulate)
-use_condaenv('r-reticulate')
+library(devtools)
+
+library(tensorflow)
+install_tensorflow(package_url = "https://pypi.python.org/packages/b8/d6/af3d52dd52150ec4a6ceb7788bfeb2f62ecb6aa2d1172211c4db39b349a2/tensorflow-1.3.0rc0-cp27-cp27mu-manylinux1_x86_64.whl#md5=1cf77a2360ae2e38dd3578618eacc03b")
+devtools::install_github("abresler/markovifyR")
+
+use_condaenv('r-reticulate-proj')
+
+install.packages("unix") 
+library(unix)
+rlimit_as(1e12)
 
 # check an author exists in the Project Gutenberg database
 gutenberg_works() %>% 
@@ -26,10 +36,10 @@ selected_author_books <- gutenberg_works(
   filter(!grepl("^ (I|V|X)( |\\.|[A-Z]{1}[a-z]*|of|the|and)*", text)) # remove chapter headings 
 
 # replace special characters in the text field with spaces
-df$text <- str_replace(df$text,"[^[:graph:]]", " ") 
+selected_author_books$text <- str_replace(selected_author_books$text,"[^[:graph:]]", " ") 
 
 # write to text file 
-write.table(df$text, "selected_author_books.txt", sep="\t",row.names=FALSE)
+write.table(selected_author_books$text[1:20000], "selected_author_books.txt", sep="\t",row.names=FALSE)
 
 # read in text file as a string for manipulation (for working offline)
 fileName <- 'test.txt'
@@ -57,7 +67,7 @@ markov_model <-
     max_overlap_ratio = .5
   )
 
-# generate the strings of tweet length
+# generate the strings of sentence length
 markovify_text(
   markov_model = markov_model,
   maximum_sentence_length = 240,
@@ -75,15 +85,16 @@ works_str <- readChar(fileName, file.info(fileName)$size) %>%
   gsub("\\\"", "", .) %>% # strip out backslash quotes
   gsub("\\n", " ", .) %>% # strip out new line chars 
   iconv(., to='ASCII//TRANSLIT', sub='')%>%
-  gsub('[^a-zA-Z0-9 -]', " ", .) %>%
+  gsub("[^[:alnum:]\\-\\.\\s ]", "", .) %>%
   gsub('  ', " ", .) %>%
-  tokenize_characters(lowercase = TRUE, strip_non_alphanum = TRUE, simplify = TRUE)
+  tokenize_characters(lowercase = FALSE, strip_non_alphanum = FALSE, simplify = TRUE)
 
 chars <- works_str %>%
   unique() %>%
   sort()
 chars
 
+# set the maximum vector length to train with
 max_length <- 30
 dataset <- map(
   seq(1, length(works_str) - max_length - 1, by = 3), 
@@ -125,7 +136,7 @@ create_model <- function(chars, max_length){
     layer_activation("softmax") %>% 
     compile(
       loss = "categorical_crossentropy", 
-      optimizer = optimizer_rmsprop(lr = 0.01)
+      optimizer = 'adam'
     )
 }
 
@@ -140,8 +151,8 @@ fit_model <- function(model, vectors, epochs = 1){
   NULL
 }
 
-# generate a tweet 
-generate_tweet <- function(model, text, chars, max_length, diversity){
+# generate a sentence 
+generate_sentence <- function(model, text, chars, max_length, diversity){
   
   # function to choose the next character for the phrase 
   choose_next_char <- function(preds, chars, div){
@@ -174,7 +185,7 @@ generate_tweet <- function(model, text, chars, max_length, diversity){
   generated <- ""
   
   # while we still need characters for the phrase
-  for(i in 1:(max_length * 3)){
+  for(i in 1:(max_length * 6)){
     
     sentence_data <- convert_sentence_to_data(sentence, chars)
     
@@ -188,9 +199,6 @@ generate_tweet <- function(model, text, chars, max_length, diversity){
     generated <- str_c(generated, next_char, collapse = "")
     sentence <- c(sentence[-1], next_char)
     
-    if (sentence[-1] == " " & next_char == " ") {
-      break
-    }
   }
   
   generated
@@ -213,15 +221,15 @@ iterate_model <- function(model, text, chars, max_length,
       
       message(sprintf("diversity: %f ---------------\n\n", diversity))
       
-      # generate a tweet
+      # generate a sentence
       current_phrase <- 1:10 %>% 
-        map_chr(function(x) generate_tweet(model,
+        map_chr(function(x) generate_sentence(model,
                                             text,
                                             chars,
                                             max_length, 
                                             diversity))
       
-      # print the current generated tweet
+      # print the current generated sentence
       message(current_phrase, sep="\n")
       message("\n\n")
       
@@ -232,17 +240,15 @@ iterate_model <- function(model, text, chars, max_length,
 
 # create the model and begin iterating
 model <- create_model(chars, max_length)
-iterate_model(model, works_str, chars, max_length, diversity, vectors, 20)
+iterate_model(model, works_str, chars, max_length, diversity, vectors, 30)
 ## NULL
 
 # build a df to hold results 
-result <- data_frame(diversity = rep(c(0.2, 0.4, 0.6), 20)) %>%
+result <- data.frame(diversity = rep(c(0.1, 0.2, 0.4, 0.6, 0.8), 20)) %>%
   mutate(phrase = map_chr(diversity,
-                          ~ generate_tweet(model, text, chars, max_length, .x))) %>%
+                          ~ generate_sentence(model, works_str, chars, max_length, .x))) %>%
   arrange(diversity)
 
 # sample the results and show 
-result %>%
-  sample_n(10) %>%
-  arrange(diversity) %>%
-  kable()
+result 
+
